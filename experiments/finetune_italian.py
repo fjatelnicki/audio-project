@@ -3,7 +3,7 @@
 
 # # Imports
 
-# In[7]:
+# In[1]:
 
 
 from transformers import Wav2Vec2CTCTokenizer, Wav2Vec2FeatureExtractor, Wav2Vec2ForCTC, Wav2Vec2Processor, TrainingArguments, Trainer
@@ -22,44 +22,30 @@ import numpy as np
 import json
 
 
-# In[8]:
-
-
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"]="5"
-
-
 # # Preprocess data
 
 # ## Load dataset
 
-# In[9]:
+# In[2]:
 
 
 def load_texts(split="", base_path=""):
     texts={}
     
     with open(f"{base_path}/transcripts.txt", "r") as f:
-        for line in f.readlines():
+        for line in f.readlines()[:15000]:
             tokens = line.split("\n")[0].split("\t")
             texts[tokens[0]] = " ".join(tokens[1:])
 
     return texts
-
-
-def load_audio(split="", path=""):
-    speech, sr = torchaudio.load(path)
-    speech = speech.squeeze()
-    
-    return np.array(speech.numpy())
     
 
 def load_dataset_split(config="", split=""):
-    BASE_PATH = f"../data/{config}/mls_polish_opus/{split.lower()}"
+    BASE_PATH = f"../data/{config}/mls_italian_opus/{split.lower()}"
     
     texts = load_texts(split, BASE_PATH)
     
-    audio_file_paths = [f"{BASE_PATH}/audio/{'/'.join(key.split('_')[:2])}/{key}.opus.mp3" for key in list(texts.keys())]
+    audio_file_paths = [f"{BASE_PATH}/audio_mp3/{key}.opus.mp3" for key in list(texts.keys())]
     
     dataset = Dataset.from_dict({"text": texts.values(), "audio": audio_file_paths}).cast_column("audio", Audio(sampling_rate=16000))
 
@@ -74,21 +60,21 @@ def load_dataset(config=""):
         
     return DatasetDict(d)
 
-polish = load_dataset("polish")
+italian = load_dataset("italian")
 
 
-# In[10]:
+# In[3]:
 
 
-polish
+italian
 
 
 # ## Create tokenizer
 
-# In[11]:
+# In[4]:
 
 
-vocab_dict = {v: k for k, v in enumerate(list(set("".join(polish["train"]["text"]))))}
+vocab_dict = {v: k for k, v in enumerate(list(set("".join(italian["train"]["text"]))))}
 vocab_dict["|"] = vocab_dict[" "]
 del vocab_dict[" "]
 vocab_dict["[UNK]"] = len(vocab_dict)
@@ -97,12 +83,14 @@ vocab_dict["[PAD]"] = len(vocab_dict)
 vocab_dict
 
 
-# In[12]:
+# In[7]:
 
 
-VOCAB_PATH = "../models/wav2vec2-base/polish/vocab.json"
+VOCAB_PATH = "../models/wav2vec2-base/italian/vocab.json"
 
-with open(VOCAB_PATH, 'w') as vocab_file:
+os.makedirs(os.path.dirname(VOCAB_PATH), exist_ok=True)
+
+with open(VOCAB_PATH, 'w+') as vocab_file:
     json.dump(vocab_dict, vocab_file)
     
 tokenizer = Wav2Vec2CTCTokenizer(VOCAB_PATH, unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="|")
@@ -110,7 +98,7 @@ tokenizer = Wav2Vec2CTCTokenizer(VOCAB_PATH, unk_token="[UNK]", pad_token="[PAD]
 
 # ## Create feature extractor
 
-# In[13]:
+# In[8]:
 
 
 feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0, do_normalize=True, return_attention_mask=False)
@@ -118,7 +106,7 @@ feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000
 
 # ## Create processor
 
-# In[14]:
+# In[9]:
 
 
 processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
@@ -126,7 +114,7 @@ processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tok
 
 # ## Preprocess audio
 
-# In[15]:
+# In[14]:
 
 
 def preprocess_audio(batch):
@@ -138,7 +126,7 @@ def preprocess_audio(batch):
         
     return batch
 
-polish = polish.map(preprocess_audio, remove_columns=polish.column_names["train"], num_proc=4)
+italian = italian.map(preprocess_audio, remove_columns=italian.column_names["train"], num_proc=2)
 
 
 # In[ ]:
@@ -152,7 +140,7 @@ polish = polish.map(preprocess_audio, remove_columns=polish.column_names["train"
 
 # ## Setup trainer
 
-# In[16]:
+# In[15]:
 
 
 @dataclass
@@ -204,7 +192,7 @@ data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
 
 # ## Setup metric
 
-# In[17]:
+# In[16]:
 
 
 wer_metric = load_metric("wer")
@@ -227,10 +215,10 @@ def compute_metrics(pred):
 
 # ## Setup and run trainer
 
-# In[30]:
+# In[18]:
 
 
-def get_trainer(train_dataset_size=5000):
+def get_trainer(dataset, language="", train_dataset_size=5000):
 
     # Load base model
     model = Wav2Vec2ForCTC.from_pretrained(
@@ -245,7 +233,7 @@ def get_trainer(train_dataset_size=5000):
 
     # Set training args
     training_args = TrainingArguments(
-        output_dir=f"../models/wav2vec2-base/polish/{train_dataset_size}",
+        output_dir=f"../models/wav2vec2-base/{language}/{train_dataset_size}",
         group_by_length=True,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=1,
@@ -268,15 +256,15 @@ def get_trainer(train_dataset_size=5000):
         data_collator=data_collator,
         args=training_args,
         compute_metrics=compute_metrics,
-        train_dataset=polish["train"].select(range(train_dataset_size)),
-        eval_dataset=polish["test"],
+        train_dataset=dataset["train"].select(range(train_dataset_size)),
+        eval_dataset=dataset["test"],
         tokenizer=processor.feature_extractor,
     )
     
     return trainer
 
-for train_dataset_size in [5000, 10000, 15000]:
-    trainer = get_trainer(train_dataset_size)
+for train_dataset_size in [15000]:
+    trainer = get_trainer(italian, "italian", train_dataset_size)
     
     trainer.train()
 
